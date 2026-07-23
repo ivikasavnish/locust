@@ -17,7 +17,7 @@ import tempfile
 import textwrap
 from collections import OrderedDict
 from typing import Any, NamedTuple
-from urllib.parse import urlparse
+from urllib.parse import unquote, urlparse
 from uuid import uuid4
 
 import configargparse
@@ -33,6 +33,7 @@ version = locust.__version__
 
 
 DEFAULT_CONFIG_FILES = ("~/.locust.conf", "locust.conf", "pyproject.toml")
+CLOUD_LOCUSTFILE_SCHEMES = {"s3", "gs"}
 
 
 # Clean up downloaded locustfile on exit
@@ -164,7 +165,9 @@ def parse_locustfile_paths(paths: list[str]) -> list[str]:
 
 def _parse_locustfile_path(path: str) -> list[str]:
     parsed_paths = []
-    if is_url(path):
+    if is_cloud_locustfile_uri(path):
+        parsed_paths.append(download_locustfile_from_cloud_storage(path))
+    elif is_url(path):
         # Download the file and use the new path as locustfile
         parsed_paths.append(download_locustfile_from_url(path))
     elif os.path.isdir(path):
@@ -185,6 +188,30 @@ def _parse_locustfile_path(path: str) -> list[str]:
     return parsed_paths
 
 
+def is_cloud_locustfile_uri(path: str) -> bool:
+    return urlparse(path).scheme in CLOUD_LOCUSTFILE_SCHEMES
+
+
+def validate_locustfile_contents(source: str, contents: str) -> None:
+    try:
+        ast.parse(contents)
+    except SyntaxError:
+        sys.stderr.write(
+            f"Failed to get locustfile from: {source}. Response was not valid python code: '{contents[:100]}'"
+        )
+        sys.exit(1)
+
+
+def write_downloaded_locustfile(source: str, contents: str, filename: str) -> str:
+    validate_locustfile_contents(source, contents)
+
+    with open(os.path.join(tempfile.gettempdir(), filename), "w") as locustfile:
+        locustfile.write(contents)
+
+    atexit.register(exit_handler, locustfile.name)
+    return locustfile.name
+
+
 def download_locustfile_from_url(url: str) -> str:
     """
     Attempt to download and save locustfile from url.
@@ -196,20 +223,62 @@ def download_locustfile_from_url(url: str) -> str:
         sys.stderr.write(f"Failed to get locustfile from: {url}. Exception: {e}")
         sys.exit(1)
     else:
-        try:
-            # Check if response is valid python code
-            ast.parse(response.text)
-        except SyntaxError:
-            sys.stderr.write(
-                f"Failed to get locustfile from: {url}. Response was not valid python code: '{response.text[:100]}'"
-            )
+        return write_downloaded_locustfile(url, response.text, urlparse(url).path.split("/")[-1])
+
+
+def download_locustfile_from_cloud_storage(uri: str) -> str:
+    """
+    Attempt to download and save locustfile from an S3 or GCS URI.
+    Returns path to downloaded file.
+    """
+    parsed_uri = urlparse(uri)
+    bucket = parsed_uri.netloc
+    key = unquote(parsed_uri.path.lstrip("/"))
+    filename = os.path.basename(key)
+
+    if not bucket or not key:
+        sys.stderr.write(f"Failed to get locustfile from: {uri}. Expected format {parsed_uri.scheme}://bucket/path.py")
+        sys.exit(1)
+
+    if not filename.endswith(".py"):
+        sys.stderr.write(f"Failed to get locustfile from: {uri}. Ensure your locustfile ends with '.py'.")
+        sys.exit(1)
+
+    try:
+        if parsed_uri.scheme == "s3":
+            contents = download_locustfile_from_s3(bucket, key)
+        elif parsed_uri.scheme == "gs":
+            contents = download_locustfile_from_gcs(bucket, key)
+        else:
+            sys.stderr.write(f"Unsupported cloud locustfile scheme: {parsed_uri.scheme}")
             sys.exit(1)
+    except ImportError as e:
+        sys.stderr.write(f"Failed to get locustfile from: {uri}. {e}")
+        sys.exit(1)
+    except Exception as e:
+        sys.stderr.write(f"Failed to get locustfile from: {uri}. Exception: {e}")
+        sys.exit(1)
 
-    with open(os.path.join(tempfile.gettempdir(), urlparse(url).path.split("/")[-1]), "w") as locustfile:
-        locustfile.write(response.text)
+    return write_downloaded_locustfile(uri, contents, filename)
 
-    atexit.register(exit_handler, locustfile.name)
-    return locustfile.name
+
+def download_locustfile_from_s3(bucket: str, key: str) -> str:
+    try:
+        import boto3  # pyright: ignore[reportMissingImports]
+    except ImportError:
+        raise ImportError("Install S3 support with 'pip install locust[s3]' and configure AWS credentials.")
+
+    response = boto3.client("s3").get_object(Bucket=bucket, Key=key)
+    return response["Body"].read().decode("utf-8")
+
+
+def download_locustfile_from_gcs(bucket: str, key: str) -> str:
+    try:
+        from google.cloud import storage  # pyright: ignore[reportMissingImports]
+    except ImportError:
+        raise ImportError("Install GCS support with 'pip install locust[gcs]' and configure Google credentials.")
+
+    return storage.Client().bucket(bucket).blob(key).download_as_text()
 
 
 def get_empty_argument_parser(add_help=True, default_config_files=DEFAULT_CONFIG_FILES) -> LocustArgumentParser:
@@ -242,7 +311,7 @@ See documentation for more details, including how to set options using a file or
         "--locustfile",
         metavar="<filename>",
         default="locustfile.py",
-        help="The Python file or module that contains your test, e.g. 'my_test.py'. Accepts multiple comma-separated .py files, a package name/directory or a url to a remote locustfile. Defaults to 'locustfile.py'.",
+        help="The Python file or module that contains your test, e.g. 'my_test.py'. Accepts multiple comma-separated .py files, a package name/directory, a url, or an s3:// or gs:// URI to a remote locustfile. Defaults to 'locustfile.py'.",
         env_var="LOCUST_LOCUSTFILE",
     )
 

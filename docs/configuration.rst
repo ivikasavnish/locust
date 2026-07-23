@@ -158,6 +158,30 @@ Example:
 
     $ locust -f https://raw.githubusercontent.com/locustio/locust/master/examples/basic.py
 
+Cloud-hosted locustfiles
+------------------------
+
+``-f/--locustfile`` also accepts single-file locustfiles stored in Amazon S3 or Google Cloud Storage. This is useful
+for managed load-testing environments where test definitions are uploaded by a CI pipeline or selected from a customer
+bucket at run time.
+
+Install the optional dependency for the provider you use:
+
+.. code-block:: console
+
+    $ pip install "locust[s3]"
+    $ pip install "locust[gcs]"
+
+Then pass an object URI:
+
+.. code-block:: console
+
+    $ locust -f s3://my-load-tests/checkout.py
+    $ locust -f gs://my-load-tests/checkout.py
+
+Locust uses the standard credential chain for each provider: ``boto3`` credentials for S3 and Google Application
+Default Credentials for GCS. The object key must end in ``.py`` and the downloaded contents must be valid Python code.
+
 
 .. _class-picker:
 

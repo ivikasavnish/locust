@@ -6,6 +6,7 @@ from locust.argument_parser import (
 )
 
 import os
+import tempfile
 import unittest
 from io import StringIO
 from tempfile import NamedTemporaryFile, TemporaryDirectory
@@ -446,6 +447,63 @@ class TestFindLocustfiles(LocustTestCase):
                 with self.assertRaises(SystemExit):
                     invalid_file = NamedTemporaryFile(suffix=".txt")
                     parse_locustfile_paths([valid_file.file_path, invalid_file.name])
+
+    def test_find_locustfile_with_s3_uri(self):
+        body = mock.Mock()
+        body.read.return_value = b"from locust import User\n"
+        s3_client = mock.Mock()
+        s3_client.get_object.return_value = {"Body": body}
+        boto3 = mock.Mock()
+        boto3.client.return_value = s3_client
+
+        with mock.patch.dict("sys.modules", {"boto3": boto3}):
+            locustfiles = parse_locustfile_paths(["s3://load-test-bucket/tests/checkout.py"])
+
+        self.assertEqual(1, len(locustfiles))
+        self.assertEqual(os.path.join(tempfile.gettempdir(), "checkout.py"), locustfiles[0])
+        s3_client.get_object.assert_called_once_with(Bucket="load-test-bucket", Key="tests/checkout.py")
+
+        with open(locustfiles[0]) as downloaded_file:
+            self.assertEqual("from locust import User\n", downloaded_file.read())
+
+    def test_find_locustfile_with_gcs_uri(self):
+        blob = mock.Mock()
+        blob.download_as_text.return_value = "from locust import User\n"
+        bucket = mock.Mock()
+        bucket.blob.return_value = blob
+        client = mock.Mock()
+        client.bucket.return_value = bucket
+        storage = mock.Mock()
+        storage.Client.return_value = client
+
+        with mock.patch.dict("sys.modules", {"google": mock.Mock(), "google.cloud": mock.Mock(storage=storage)}):
+            locustfiles = parse_locustfile_paths(["gs://load-test-bucket/tests/checkout.py"])
+
+        self.assertEqual(1, len(locustfiles))
+        self.assertEqual(os.path.join(tempfile.gettempdir(), "checkout.py"), locustfiles[0])
+        client.bucket.assert_called_once_with("load-test-bucket")
+        bucket.blob.assert_called_once_with("tests/checkout.py")
+
+        with open(locustfiles[0]) as downloaded_file:
+            self.assertEqual("from locust import User\n", downloaded_file.read())
+
+    def test_find_cloud_locustfile_error_for_invalid_python(self):
+        body = mock.Mock()
+        body.read.return_value = b"not valid python:"
+        s3_client = mock.Mock()
+        s3_client.get_object.return_value = {"Body": body}
+        boto3 = mock.Mock()
+        boto3.client.return_value = s3_client
+
+        with mock.patch("sys.stderr", new=StringIO()):
+            with mock.patch.dict("sys.modules", {"boto3": boto3}):
+                with self.assertRaises(SystemExit):
+                    parse_locustfile_paths(["s3://load-test-bucket/tests/checkout.py"])
+
+    def test_find_cloud_locustfile_error_for_invalid_extension(self):
+        with mock.patch("sys.stderr", new=StringIO()):
+            with self.assertRaises(SystemExit):
+                parse_locustfile_paths(["gs://load-test-bucket/tests/checkout.txt"])
 
     def test_find_locustfiles_error_if_multiple_values_for_directory(self):
         with mock.patch("sys.stderr", new=StringIO()):
