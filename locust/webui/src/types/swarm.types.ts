@@ -114,6 +114,7 @@ export interface ISwarmFormInput extends Partial<
   queueMode?: 'start_now' | 'queue' | 'schedule';
   runTime?: string;
   scheduledStartTime?: string;
+  selectedTestFiles?: string[];
   userClasses?: string[];
   shapeClass?: string;
 }
@@ -123,4 +124,17 @@ export interface IStartSwarmResponse {
   message: string;
   host: string;
   scheduledTests?: IScheduledTest[];
+}
+
+export interface ITestSourceFile {
+  path: string;
+  userClasses: string[];
+}
+
+export interface ITestSourcePreviewResponse {
+  success: boolean;
+  message?: string;
+  files: ITestSourceFile[];
+  userClasses: string[];
+  standardFolders: string[];
 }

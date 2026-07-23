@@ -14,10 +14,12 @@ import csv
 import json
 import logging
 import os
+import subprocess
 import traceback
 from datetime import datetime, timedelta
 from io import StringIO
-from tempfile import NamedTemporaryFile
+from pathlib import Path
+from tempfile import NamedTemporaryFile, TemporaryDirectory
 
 import gevent
 import requests
@@ -1041,6 +1043,81 @@ class TestWebUI(LocustTestCase, _HeaderCheckMixin):
         self.assertEqual(200, response.status_code)
         self.assertEqual(False, response.json()["success"])
         self.assertEqual("Scheduled start time must be in the future.", response.json()["message"])
+
+    def test_preview_and_run_selected_tests_from_git_uri(self):
+        with TemporaryDirectory() as repository:
+            repository_path = Path(repository)
+            locustfiles_path = repository_path / "locustfiles"
+            load_tests_path = repository_path / "load_tests"
+            locustfiles_path.mkdir()
+            load_tests_path.mkdir()
+            (locustfiles_path / "checkout.py").write_text(
+                "from locust import User, task, constant\n"
+                "class CheckoutUser(User):\n"
+                "    wait_time = constant(1)\n"
+                "    @task\n"
+                "    def checkout(self):\n"
+                "        pass\n"
+            )
+            (load_tests_path / "search.py").write_text(
+                "from locust import User, task, constant\n"
+                "class SearchUser(User):\n"
+                "    wait_time = constant(1)\n"
+                "    @task\n"
+                "    def search(self):\n"
+                "        pass\n"
+            )
+            subprocess.run(["git", "init"], cwd=repository, check=True, capture_output=True)
+            subprocess.run(["git", "add", "."], cwd=repository, check=True, capture_output=True)
+            subprocess.run(
+                [
+                    "git",
+                    "-c",
+                    "user.email=locust@example.com",
+                    "-c",
+                    "user.name=Locust",
+                    "commit",
+                    "-m",
+                    "add load tests",
+                ],
+                cwd=repository,
+                check=True,
+                capture_output=True,
+            )
+
+            git_source = f"git+file://{repository}"
+            preview_response = requests.post(
+                "http://127.0.0.1:%i/test-source/preview" % self.web_port,
+                data={"locustfile_source": git_source},
+            )
+
+            self.assertEqual(200, preview_response.status_code)
+            self.assertEqual(True, preview_response.json()["success"])
+            self.assertEqual(
+                ["CheckoutUser", "SearchUser"],
+                preview_response.json()["user_classes"],
+            )
+            self.assertEqual(
+                ["load_tests/search.py", "locustfiles/checkout.py"],
+                sorted(file["path"] for file in preview_response.json()["files"]),
+            )
+
+            swarm_response = requests.post(
+                "http://127.0.0.1:%i/swarm" % self.web_port,
+                data={
+                    "locustfile_source": git_source,
+                    "selected_test_files": "locustfiles/checkout.py",
+                    "user_classes": "CheckoutUser",
+                    "user_count": 1,
+                    "spawn_rate": 1,
+                    "host": "https://localhost",
+                },
+            )
+
+        self.assertEqual(200, swarm_response.status_code)
+        self.assertEqual(True, swarm_response.json()["success"])
+        self.assertEqual(["CheckoutUser"], sorted(self.environment.user_classes_by_name))
+        requests.get("http://127.0.0.1:%i/stop" % self.web_port)
 
     def test_host_value_from_user_class(self):
         class MyUser(User):

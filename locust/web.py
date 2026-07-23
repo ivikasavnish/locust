@@ -6,12 +6,17 @@ import json
 import logging
 import mimetypes
 import os.path
+import shutil
+import subprocess
+import tempfile
 import time
 from datetime import datetime
 from functools import wraps
 from io import StringIO
 from json import dumps
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, TypedDict
+from urllib.parse import parse_qs
 from uuid import uuid4
 
 import gevent
@@ -55,6 +60,16 @@ greenlet_exception_handler = greenlet_exception_logger(logger)
 
 DEFAULT_CACHE_TIME = 2.0
 HOST_IS_REQUIRED = False
+STANDARD_TEST_FOLDERS = (
+    "locustfiles",
+    "load_tests",
+    "loadtests",
+    "performance",
+    "perf",
+    "tests/load",
+    "tests/performance",
+    "tests",
+)
 
 
 class InputField(TypedDict, total=False):
@@ -246,6 +261,25 @@ class WebUI:
         @self.auth_required_if_enabled
         def scheduled_tests() -> Response:
             return jsonify({"scheduled_tests": self.scheduled_tests})
+
+        @app_blueprint.route("/test-source/preview", methods=["POST"])
+        @self.auth_required_if_enabled
+        def preview_test_source() -> Response:
+            form_data = self._normalize_form_data(request.form)
+            locustfile_source = str(form_data.get("locustfile_source", "")).strip()
+            if not locustfile_source:
+                return jsonify({"success": False, "message": "Missing locustfile source."})
+
+            try:
+                preview = self._preview_locustfile_source(
+                    locustfile_source,
+                    self._form_values(form_data, "selected_test_files"),
+                )
+            except Exception as e:
+                logger.exception("Failed to preview test source")
+                return jsonify({"success": False, "message": f"Failed to preview test source: {e}"})
+
+            return jsonify({"success": True, **preview})
 
         @app_blueprint.route("/stop")
         @self.auth_required_if_enabled
@@ -594,18 +628,25 @@ class WebUI:
     def _start_swarm_from_form(self, form_data: dict[str, Any]) -> dict[str, Any]:
         if locustfile_source := str(form_data.get("locustfile_source", "")).strip():
             try:
-                self._load_locustfile_source(locustfile_source)
+                self._load_locustfile_source(locustfile_source, self._form_values(form_data, "selected_test_files"))
             except Exception as e:
                 logger.exception("Failed to load locustfile from UI source")
                 return {"success": False, "message": f"Failed to load locustfile: {e}", "host": self.environment.host}
+
+        form_data_user_class_names = self._form_values(form_data, "user_classes")
+        if form_data_user_class_names and self.environment.available_user_classes:
+            user_classes = {
+                user_class_name: user_class_object
+                for user_class_name, user_class_object in self.environment.available_user_classes.items()
+                if user_class_name in form_data_user_class_names
+            }
+            self._update_user_classes(user_classes)
 
         user_classes: dict[str, Any] = {}
         if self.userclass_picker_is_active:
             if not self.environment.available_user_classes:
                 err_msg = "UserClass picker is active but there are no available UserClasses"
                 return {"success": False, "message": err_msg, "host": self.environment.host}
-
-            form_data_user_class_names = self._form_values(form_data, "user_classes")
 
             if form_data_user_class_names:
                 user_classes = {
@@ -634,7 +675,7 @@ class WebUI:
         run_time = None
         user_count = None
         spawn_rate = None
-        ignored_keys = {"locustfile_source"}
+        ignored_keys = {"locustfile_source", "selected_test_files", "scheduled_start_time"}
         for key, value in form_data.items():
             if key in ignored_keys:
                 continue
@@ -730,8 +771,10 @@ class WebUI:
             return [str(value)]
         return []
 
-    def _load_locustfile_source(self, locustfile_source: str) -> None:
-        locustfiles = argument_parser.parse_locustfile_paths([locustfile_source])
+    def _load_locustfile_source(self, locustfile_source: str, selected_test_files: list[str] | None = None) -> None:
+        locustfiles, display_source, cleanup_path = self._resolve_locustfile_source(
+            locustfile_source, selected_test_files
+        )
         available_user_classes: dict[str, Any] = {}
         available_shape_classes: dict[str, Any] = {}
         available_user_tasks: dict[str, Any] = {}
@@ -757,7 +800,9 @@ class WebUI:
             raise ValueError("No User classes found in locustfile.")
 
         self.environment.parsed_locustfiles = locustfiles
-        self.environment.locustfile = locustfile_source
+        self.environment.locustfile = display_source
+        if cleanup_path:
+            self.environment.ui_source_checkout = cleanup_path
         self.environment.available_user_classes = available_user_classes
         self.environment.available_shape_classes = available_shape_classes
         self.environment.available_user_tasks = available_user_tasks
@@ -768,6 +813,110 @@ class WebUI:
         self.environment._remove_user_classes_with_weight_zero()
         self.environment._validate_user_class_name_uniqueness()
         self.environment._validate_shape_class_instance()
+
+    def _preview_locustfile_source(
+        self, locustfile_source: str, selected_test_files: list[str] | None = None
+    ) -> dict[str, Any]:
+        locustfiles, _display_source, cleanup_path = self._resolve_locustfile_source(
+            locustfile_source, selected_test_files
+        )
+        try:
+            file_previews = []
+            all_user_classes = []
+            for locustfile in locustfiles:
+                user_classes, _shape_classes = load_locustfile(locustfile)
+                if not user_classes:
+                    user_classes = load_locustfile_pytest(locustfile)
+                file_preview = {
+                    "path": self._display_test_file_path(locustfile, cleanup_path),
+                    "user_classes": sorted(user_classes),
+                }
+                file_previews.append(file_preview)
+                all_user_classes.extend(file_preview["user_classes"])
+
+            return {
+                "files": file_previews,
+                "user_classes": sorted(set(all_user_classes)),
+                "standard_folders": list(STANDARD_TEST_FOLDERS),
+            }
+        finally:
+            if cleanup_path:
+                shutil.rmtree(cleanup_path, ignore_errors=True)
+
+    def _resolve_locustfile_source(
+        self, locustfile_source: str, selected_test_files: list[str] | None = None
+    ) -> tuple[list[str], str, str | None]:
+        selected_test_files = selected_test_files or []
+        if self._is_git_source(locustfile_source):
+            checkout_path, repo_uri = self._clone_git_source(locustfile_source)
+            return self._git_locustfiles(checkout_path, selected_test_files), repo_uri, checkout_path
+
+        return argument_parser.parse_locustfile_paths([locustfile_source]), locustfile_source, None
+
+    def _is_git_source(self, locustfile_source: str) -> bool:
+        return (
+            locustfile_source.startswith("git+")
+            or locustfile_source.startswith("git@")
+            or locustfile_source.endswith(".git")
+        )
+
+    def _clone_git_source(self, locustfile_source: str) -> tuple[str, str]:
+        repo_uri = locustfile_source.removeprefix("git+")
+        ref = ""
+        if "#" in repo_uri:
+            repo_uri, fragment = repo_uri.split("#", 1)
+            query = parse_qs(fragment)
+            ref = (query.get("ref") or query.get("branch") or [""])[0]
+
+        checkout_path = tempfile.mkdtemp(prefix="locust-git-")
+        command = ["git", "clone", "--depth", "1"]
+        if ref:
+            command.extend(["--branch", ref])
+        command.extend([repo_uri, checkout_path])
+
+        try:
+            subprocess.run(command, check=True, capture_output=True, text=True, timeout=120)
+        except subprocess.CalledProcessError as e:
+            shutil.rmtree(checkout_path, ignore_errors=True)
+            raise ValueError((e.stderr or e.stdout or "git clone failed").strip()) from e
+
+        return checkout_path, repo_uri
+
+    def _git_locustfiles(self, checkout_path: str, selected_test_files: list[str]) -> list[str]:
+        base_path = Path(checkout_path).resolve()
+        if selected_test_files:
+            locustfiles = [self._safe_checkout_path(base_path, selected_file) for selected_file in selected_test_files]
+        else:
+            locustfiles = self._standard_folder_locustfiles(base_path)
+
+        if not locustfiles:
+            raise ValueError(f"No Python test files found in standard folders: {', '.join(STANDARD_TEST_FOLDERS)}")
+
+        return [str(locustfile) for locustfile in locustfiles]
+
+    def _safe_checkout_path(self, base_path: Path, selected_file: str) -> Path:
+        selected_path = (base_path / selected_file).resolve()
+        if base_path not in selected_path.parents or not selected_path.is_file() or selected_path.suffix != ".py":
+            raise ValueError(f"Selected test file is not valid: {selected_file}")
+        return selected_path
+
+    def _standard_folder_locustfiles(self, base_path: Path) -> list[Path]:
+        locustfiles: list[Path] = []
+        for folder in STANDARD_TEST_FOLDERS:
+            test_folder = base_path / folder
+            if test_folder.is_dir():
+                locustfiles.extend(sorted(test_folder.rglob("*.py")))
+
+        root_locustfile = base_path / "locustfile.py"
+        if root_locustfile.is_file():
+            locustfiles.insert(0, root_locustfile)
+
+        return list(dict.fromkeys(locustfiles))
+
+    def _display_test_file_path(self, locustfile: str, checkout_path: str | None) -> str:
+        if not checkout_path:
+            return locustfile
+        return str(Path(locustfile).resolve().relative_to(Path(checkout_path).resolve()))
 
     def auth_required_if_enabled(self, view_func):
         """

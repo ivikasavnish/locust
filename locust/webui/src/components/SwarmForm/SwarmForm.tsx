@@ -8,7 +8,9 @@ import {
   Autocomplete,
   Box,
   Button,
+  Checkbox,
   Container,
+  FormControlLabel,
   FormControl,
   InputLabel,
   Link,
@@ -28,12 +30,17 @@ import CustomParameters from 'components/SwarmForm/SwarmCustomParameters';
 import SwarmUserClassPicker from 'components/SwarmForm/SwarmUserClassPicker';
 import { SWARM_STATE } from 'constants/swarm';
 import useForm from 'hooks/useForm';
-import { useStartSwarmMutation } from 'redux/api/swarm';
+import { usePreviewTestSourceMutation, useStartSwarmMutation } from 'redux/api/swarm';
 import { useSelector } from 'redux/hooks';
 import { swarmActions } from 'redux/slice/swarm.slice';
 import { IRootState } from 'redux/store';
 import { ICustomInput } from 'types/form.types';
-import { IExtraOptions, ISwarmFormInput, ISwarmState } from 'types/swarm.types';
+import {
+  IExtraOptions,
+  ISwarmFormInput,
+  ISwarmState,
+  ITestSourcePreviewResponse,
+} from 'types/swarm.types';
 import { isEmpty } from 'utils/object';
 
 const URL_VALIDATION_REGEX = /^(?:[a-zA-Z][a-zA-Z\d+\-.]*):\/\/[^\s/$.?#].[^\s]*$/;
@@ -133,10 +140,17 @@ function SwarmForm({
   advancedOptions,
 }: ISwarmForm) {
   const [startSwarm] = useStartSwarmMutation();
+  const [previewTestSource, { isLoading: isPreviewingTestSource }] = usePreviewTestSourceMutation();
   const [errorMessage, setErrorMessage] = useState('');
   const [selectedUserClasses, setSelectedUserClasses] = useState(availableUserClasses);
   const [hostValue, setHostValue] = useState(host || '');
+  const [locustfileSource, setLocustfileSource] = useState('');
   const [queueMode, setQueueMode] = useState<ISwarmFormInput['queueMode']>('start_now');
+  const [testSourcePreview, setTestSourcePreview] = useState<ITestSourcePreviewResponse | null>(
+    null,
+  );
+  const [selectedTestFiles, setSelectedTestFiles] = useState<string[]>([]);
+  const [sourceUserClasses, setSourceUserClasses] = useState<string[]>([]);
   const swarm = useSelector(({ swarm }) => swarm);
   const { register } = useForm();
 
@@ -198,6 +212,34 @@ function SwarmForm({
         hideCommonOptions: hasSelectedShapeClass,
       });
     }
+  };
+
+  const onPreviewTestSource = async () => {
+    setErrorMessage('');
+
+    const { data } = await previewTestSource({ locustfileSource });
+    if (!data || !data.success) {
+      setErrorMessage(data?.message || 'Could not discover tests from source.');
+      return;
+    }
+
+    setTestSourcePreview(data);
+    setSelectedTestFiles(data.files.map(file => file.path));
+    setSourceUserClasses(data.userClasses);
+  };
+
+  const setSelectedTestFile = (filePath: string, isSelected: boolean) => {
+    setSelectedTestFiles(currentFiles =>
+      isSelected ? [...currentFiles, filePath] : currentFiles.filter(path => path !== filePath),
+    );
+  };
+
+  const setSelectedSourceUserClass = (userClass: string, isSelected: boolean) => {
+    setSourceUserClasses(currentUserClasses =>
+      isSelected
+        ? [...currentUserClasses, userClass]
+        : currentUserClasses.filter(className => className !== userClass),
+    );
   };
 
   return (
@@ -282,8 +324,102 @@ function SwarmForm({
                     <TextField
                       label='Locustfile source'
                       name='locustfileSource'
-                      placeholder='s3://bucket/test.py or gs://bucket/test.py'
+                      onChange={event => setLocustfileSource(event.target.value)}
+                      placeholder='git+https://github.com/org/repo.git, s3://bucket/test.py, gs://bucket/test.py'
+                      value={locustfileSource}
                     />
+                    {selectedTestFiles.map(filePath => (
+                      <input key={filePath} name='selectedTestFiles' type='hidden' value={filePath} />
+                    ))}
+                    {sourceUserClasses.map(userClass => (
+                      <input key={userClass} name='userClasses' type='hidden' value={userClass} />
+                    ))}
+                    <Box sx={{ display: 'flex', gap: 1, flexWrap: 'wrap' }}>
+                      <Button
+                        disabled={!locustfileSource || isPreviewingTestSource}
+                        onClick={onPreviewTestSource}
+                        type='button'
+                        variant='outlined'
+                      >
+                        Discover tests
+                      </Button>
+                      {!!testSourcePreview?.files.length && (
+                        <>
+                          <Button
+                            onClick={() =>
+                              setSelectedTestFiles(testSourcePreview.files.map(file => file.path))
+                            }
+                            type='button'
+                          >
+                            Select files
+                          </Button>
+                          <Button onClick={() => setSelectedTestFiles([])} type='button'>
+                            Deselect files
+                          </Button>
+                          <Button
+                            onClick={() => setSourceUserClasses(testSourcePreview.userClasses)}
+                            type='button'
+                          >
+                            Select classes
+                          </Button>
+                          <Button onClick={() => setSourceUserClasses([])} type='button'>
+                            Deselect classes
+                          </Button>
+                        </>
+                      )}
+                    </Box>
+                    {!!testSourcePreview?.files.length && (
+                      <Box sx={{ display: 'grid', gap: 2 }}>
+                        <Typography variant='subtitle2'>Test files</Typography>
+                        {testSourcePreview.files.map(file => (
+                          <Box
+                            key={file.path}
+                            sx={{
+                              border: '1px solid',
+                              borderColor: 'divider',
+                              borderRadius: 1,
+                              p: 1,
+                            }}
+                          >
+                            <FormControlLabel
+                              control={
+                                <Checkbox
+                                  checked={selectedTestFiles.includes(file.path)}
+                                  onChange={event =>
+                                    setSelectedTestFile(file.path, event.target.checked)
+                                  }
+                                />
+                              }
+                              label={file.path}
+                            />
+                            {!!file.userClasses.length && (
+                              <Typography color='text.secondary' variant='caption'>
+                                {file.userClasses.join(', ')}
+                              </Typography>
+                            )}
+                          </Box>
+                        ))}
+                        {!!testSourcePreview.userClasses.length && (
+                          <Box sx={{ display: 'grid', gap: 1 }}>
+                            <Typography variant='subtitle2'>User classes</Typography>
+                            {testSourcePreview.userClasses.map(userClass => (
+                              <FormControlLabel
+                                control={
+                                  <Checkbox
+                                    checked={sourceUserClasses.includes(userClass)}
+                                    onChange={event =>
+                                      setSelectedSourceUserClass(userClass, event.target.checked)
+                                    }
+                                  />
+                                }
+                                key={userClass}
+                                label={userClass}
+                              />
+                            ))}
+                          </Box>
+                        )}
+                      </Box>
+                    )}
                     <FormControl>
                       <InputLabel htmlFor='queueMode' shrink>
                         Run mode

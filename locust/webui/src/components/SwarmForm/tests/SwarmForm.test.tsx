@@ -1,5 +1,5 @@
 import { act, fireEvent, waitFor } from '@testing-library/react';
-import { http } from 'msw';
+import { http, HttpResponse } from 'msw';
 import { setupServer } from 'msw/node';
 import { afterEach, afterAll, beforeAll, describe, test, expect, vi } from 'vitest';
 
@@ -10,6 +10,7 @@ import { renderWithProvider } from 'test/testUtils';
 import { camelCaseKeys, queryStringToObject, toTitleCase } from 'utils/string';
 
 const startSwarm = vi.fn();
+const previewTestSource = vi.fn();
 
 const getStartSwarmMockCall = () => {
   const mockCalls = startSwarm.mock.calls[0];
@@ -21,6 +22,18 @@ const server = setupServer(
   http.post(`${TEST_BASE_API}/swarm`, async ({ request }) =>
     startSwarm(camelCaseKeys(queryStringToObject(await request.text()))),
   ),
+  http.post(`${TEST_BASE_API}/test-source/preview`, async ({ request }) => {
+    previewTestSource(camelCaseKeys(queryStringToObject(await request.text())));
+    return HttpResponse.json({
+      success: true,
+      files: [
+        { path: 'locustfiles/checkout.py', user_classes: ['CheckoutUser'] },
+        { path: 'load_tests/search.py', user_classes: ['SearchUser'] },
+      ],
+      user_classes: ['CheckoutUser', 'SearchUser'],
+      standard_folders: ['locustfiles', 'load_tests'],
+    });
+  }),
 );
 
 describe('SwarmForm', () => {
@@ -28,6 +41,7 @@ describe('SwarmForm', () => {
   afterEach(() => {
     server.resetHandlers();
     startSwarm.mockClear();
+    previewTestSource.mockClear();
   });
   afterAll(() => server.close());
 
@@ -314,6 +328,47 @@ describe('SwarmForm', () => {
           queueMode: 'start_now',
           runTime: '',
           spawnRate: '1',
+          userCount: '1',
+          profile: '',
+        });
+      }
+    });
+  });
+
+  test('should discover and submit selected tests from a Git source', async () => {
+    const { findByText, getByLabelText, getByText } = renderWithProvider(<SwarmForm />);
+
+    act(() => {
+      fireEvent.change(getByLabelText('Locustfile source'), {
+        target: { value: 'git+https://github.com/acme/load-tests.git' },
+      });
+      fireEvent.click(getByText('Discover tests'));
+    });
+
+    await findByText('locustfiles/checkout.py');
+
+    act(() => {
+      fireEvent.click(getByLabelText('load_tests/search.py'));
+      fireEvent.click(getByLabelText('SearchUser'));
+      fireEvent.click(getByText('Start'));
+    });
+
+    await waitFor(async () => {
+      const previewData = previewTestSource.mock.calls[0]?.[0];
+      const submittedData = getStartSwarmMockCall();
+
+      if (previewData && submittedData) {
+        expect(previewData).toEqual({
+          locustfileSource: 'git+https://github.com/acme/load-tests.git',
+        });
+        expect(submittedData).toEqual({
+          host: swarmStateMock.host,
+          locustfileSource: 'git+https://github.com/acme/load-tests.git',
+          queueMode: 'start_now',
+          runTime: '',
+          selectedTestFiles: 'locustfiles/checkout.py',
+          spawnRate: '1',
+          userClasses: 'CheckoutUser',
           userCount: '1',
           profile: '',
         });

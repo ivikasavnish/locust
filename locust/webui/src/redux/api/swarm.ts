@@ -1,6 +1,10 @@
 import { createApi, fetchBaseQuery } from '@reduxjs/toolkit/query/react';
 
-import { IStartSwarmResponse, ISwarmFormInput } from 'types/swarm.types';
+import {
+  IStartSwarmResponse,
+  ISwarmFormInput,
+  ITestSourcePreviewResponse,
+} from 'types/swarm.types';
 import {
   IStatsResponse,
   ISwarmExceptionsResponse,
@@ -56,6 +60,18 @@ export const api = createApi({
       }),
       transformResponse: camelCaseKeys<IStartSwarmResponse>,
     }),
+    previewTestSource: builder.mutation<
+      ITestSourcePreviewResponse,
+      Pick<ISwarmFormInput, 'locustfileSource' | 'selectedTestFiles'>
+    >({
+      query: body => ({
+        url: 'test-source/preview',
+        method: 'POST',
+        body: createFormData(snakeCaseKeys(body)),
+        headers: { 'content-type': 'application/x-www-form-urlencoded' },
+      }),
+      transformResponse: camelCaseKeys<ITestSourcePreviewResponse>,
+    }),
     updateUserSettings: builder.mutation({
       query: body => ({
         url: 'user',
@@ -81,6 +97,7 @@ export const {
   useGetLogsQuery,
   useGetWorkerCountQuery,
   useStartSwarmMutation,
+  usePreviewTestSourceMutation,
   useUpdateUserSettingsMutation,
   useStopSwarmMutation,
   useResetStatsMutation,
