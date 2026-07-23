@@ -1119,6 +1119,19 @@ class TestWebUI(LocustTestCase, _HeaderCheckMixin):
         self.assertEqual(["CheckoutUser"], sorted(self.environment.user_classes_by_name))
         requests.get("http://127.0.0.1:%i/stop" % self.web_port)
 
+    def test_git_auth_token_is_applied_only_to_https_git_uri(self):
+        authenticated_uri = self.environment.web_ui._authenticated_git_uri(
+            "https://github.com/example/private-tests.git",
+            "secret-token",
+        )
+
+        self.assertEqual(
+            "https://x-access-token:secret-token@github.com/example/private-tests.git",
+            authenticated_uri,
+        )
+        with self.assertRaisesRegex(ValueError, "only supported for HTTPS"):
+            self.environment.web_ui._authenticated_git_uri("git@github.com:example/private-tests.git", "secret-token")
+
     def test_host_value_from_user_class(self):
         class MyUser(User):
             host = "http://example.com"

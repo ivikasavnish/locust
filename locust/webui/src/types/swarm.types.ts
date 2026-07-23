@@ -110,6 +110,7 @@ export interface IReportTemplateArgs extends Omit<IReport, 'charts'> {
 export interface ISwarmFormInput extends Partial<
   Pick<ISwarmState, 'host' | 'profile' | 'spawnRate' | 'userCount' | 'extraOptions'>
 > {
+  gitAuthToken?: string;
   locustfileSource?: string;
   queueMode?: 'start_now' | 'queue' | 'schedule';
   runTime?: string;

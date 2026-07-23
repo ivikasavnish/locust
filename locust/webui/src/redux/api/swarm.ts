@@ -62,7 +62,7 @@ export const api = createApi({
     }),
     previewTestSource: builder.mutation<
       ITestSourcePreviewResponse,
-      Pick<ISwarmFormInput, 'locustfileSource' | 'selectedTestFiles'>
+      Pick<ISwarmFormInput, 'gitAuthToken' | 'locustfileSource' | 'selectedTestFiles'>
     >({
       query: body => ({
         url: 'test-source/preview',

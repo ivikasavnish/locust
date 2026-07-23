@@ -16,7 +16,7 @@ from io import StringIO
 from json import dumps
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, TypedDict
-from urllib.parse import parse_qs
+from urllib.parse import parse_qs, urlsplit, urlunsplit
 from uuid import uuid4
 
 import gevent
@@ -274,6 +274,7 @@ class WebUI:
                 preview = self._preview_locustfile_source(
                     locustfile_source,
                     self._form_values(form_data, "selected_test_files"),
+                    str(form_data.get("git_auth_token", "")).strip(),
                 )
             except Exception as e:
                 logger.exception("Failed to preview test source")
@@ -598,6 +599,7 @@ class WebUI:
             "created_at": datetime.now().isoformat(timespec="seconds"),
             "scheduled_start_time": scheduled_start_time,
             "locustfile_source": form_data.get("locustfile_source", ""),
+            "git_auth_token": "********" if form_data.get("git_auth_token") else "",
             "host": form_data.get("host", ""),
             "user_count": form_data.get("user_count", ""),
             "spawn_rate": form_data.get("spawn_rate", ""),
@@ -628,7 +630,11 @@ class WebUI:
     def _start_swarm_from_form(self, form_data: dict[str, Any]) -> dict[str, Any]:
         if locustfile_source := str(form_data.get("locustfile_source", "")).strip():
             try:
-                self._load_locustfile_source(locustfile_source, self._form_values(form_data, "selected_test_files"))
+                self._load_locustfile_source(
+                    locustfile_source,
+                    self._form_values(form_data, "selected_test_files"),
+                    str(form_data.get("git_auth_token", "")).strip(),
+                )
             except Exception as e:
                 logger.exception("Failed to load locustfile from UI source")
                 return {"success": False, "message": f"Failed to load locustfile: {e}", "host": self.environment.host}
@@ -675,7 +681,7 @@ class WebUI:
         run_time = None
         user_count = None
         spawn_rate = None
-        ignored_keys = {"locustfile_source", "selected_test_files", "scheduled_start_time"}
+        ignored_keys = {"locustfile_source", "git_auth_token", "selected_test_files", "scheduled_start_time"}
         for key, value in form_data.items():
             if key in ignored_keys:
                 continue
@@ -771,9 +777,14 @@ class WebUI:
             return [str(value)]
         return []
 
-    def _load_locustfile_source(self, locustfile_source: str, selected_test_files: list[str] | None = None) -> None:
+    def _load_locustfile_source(
+        self,
+        locustfile_source: str,
+        selected_test_files: list[str] | None = None,
+        git_auth_token: str = "",
+    ) -> None:
         locustfiles, display_source, cleanup_path = self._resolve_locustfile_source(
-            locustfile_source, selected_test_files
+            locustfile_source, selected_test_files, git_auth_token
         )
         available_user_classes: dict[str, Any] = {}
         available_shape_classes: dict[str, Any] = {}
@@ -815,10 +826,10 @@ class WebUI:
         self.environment._validate_shape_class_instance()
 
     def _preview_locustfile_source(
-        self, locustfile_source: str, selected_test_files: list[str] | None = None
+        self, locustfile_source: str, selected_test_files: list[str] | None = None, git_auth_token: str = ""
     ) -> dict[str, Any]:
         locustfiles, _display_source, cleanup_path = self._resolve_locustfile_source(
-            locustfile_source, selected_test_files
+            locustfile_source, selected_test_files, git_auth_token
         )
         try:
             file_previews = []
@@ -844,11 +855,11 @@ class WebUI:
                 shutil.rmtree(cleanup_path, ignore_errors=True)
 
     def _resolve_locustfile_source(
-        self, locustfile_source: str, selected_test_files: list[str] | None = None
+        self, locustfile_source: str, selected_test_files: list[str] | None = None, git_auth_token: str = ""
     ) -> tuple[list[str], str, str | None]:
         selected_test_files = selected_test_files or []
         if self._is_git_source(locustfile_source):
-            checkout_path, repo_uri = self._clone_git_source(locustfile_source)
+            checkout_path, repo_uri = self._clone_git_source(locustfile_source, git_auth_token)
             return self._git_locustfiles(checkout_path, selected_test_files), repo_uri, checkout_path
 
         return argument_parser.parse_locustfile_paths([locustfile_source]), locustfile_source, None
@@ -860,7 +871,7 @@ class WebUI:
             or locustfile_source.endswith(".git")
         )
 
-    def _clone_git_source(self, locustfile_source: str) -> tuple[str, str]:
+    def _clone_git_source(self, locustfile_source: str, git_auth_token: str = "") -> tuple[str, str]:
         repo_uri = locustfile_source.removeprefix("git+")
         ref = ""
         if "#" in repo_uri:
@@ -872,7 +883,7 @@ class WebUI:
         command = ["git", "clone", "--depth", "1"]
         if ref:
             command.extend(["--branch", ref])
-        command.extend([repo_uri, checkout_path])
+        command.extend([self._authenticated_git_uri(repo_uri, git_auth_token), checkout_path])
 
         try:
             subprocess.run(command, check=True, capture_output=True, text=True, timeout=120)
@@ -881,6 +892,24 @@ class WebUI:
             raise ValueError((e.stderr or e.stdout or "git clone failed").strip()) from e
 
         return checkout_path, repo_uri
+
+    def _authenticated_git_uri(self, repo_uri: str, git_auth_token: str) -> str:
+        if not git_auth_token:
+            return repo_uri
+
+        parsed_uri = urlsplit(repo_uri)
+        if parsed_uri.scheme not in {"http", "https"} or not parsed_uri.netloc:
+            raise ValueError("Git auth token is only supported for HTTPS Git URLs.")
+
+        return urlunsplit(
+            (
+                parsed_uri.scheme,
+                f"x-access-token:{git_auth_token}@{parsed_uri.netloc}",
+                parsed_uri.path,
+                parsed_uri.query,
+                parsed_uri.fragment,
+            )
+        )
 
     def _git_locustfiles(self, checkout_path: str, selected_test_files: list[str]) -> list[str]:
         base_path = Path(checkout_path).resolve()

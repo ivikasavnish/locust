@@ -145,6 +145,7 @@ function SwarmForm({
   const [selectedUserClasses, setSelectedUserClasses] = useState(availableUserClasses);
   const [hostValue, setHostValue] = useState(host || '');
   const [locustfileSource, setLocustfileSource] = useState('');
+  const [gitAuthToken, setGitAuthToken] = useState('');
   const [queueMode, setQueueMode] = useState<ISwarmFormInput['queueMode']>('start_now');
   const [testSourcePreview, setTestSourcePreview] = useState<ITestSourcePreviewResponse | null>(
     null,
@@ -217,7 +218,7 @@ function SwarmForm({
   const onPreviewTestSource = async () => {
     setErrorMessage('');
 
-    const { data } = await previewTestSource({ locustfileSource });
+    const { data } = await previewTestSource({ gitAuthToken, locustfileSource });
     if (!data || !data.success) {
       setErrorMessage(data?.message || 'Could not discover tests from source.');
       return;
@@ -327,6 +328,14 @@ function SwarmForm({
                       onChange={event => setLocustfileSource(event.target.value)}
                       placeholder='git+https://github.com/org/repo.git, s3://bucket/test.py, gs://bucket/test.py'
                       value={locustfileSource}
+                    />
+                    <TextField
+                      label='Git auth token'
+                      name='gitAuthToken'
+                      onChange={event => setGitAuthToken(event.target.value)}
+                      placeholder='Personal access token for private HTTPS repositories'
+                      type='password'
+                      value={gitAuthToken}
                     />
                     {selectedTestFiles.map(filePath => (
                       <input key={filePath} name='selectedTestFiles' type='hidden' value={filePath} />

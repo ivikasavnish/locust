@@ -57,6 +57,7 @@ describe('SwarmForm', () => {
 
       if (submittedData) {
         expect(submittedData).toEqual({
+          gitAuthToken: '',
           host: swarmStateMock.host,
           locustfileSource: '',
           queueMode: 'start_now',
@@ -105,6 +106,7 @@ describe('SwarmForm', () => {
 
       if (submittedData) {
         expect(submittedData).toEqual({
+          gitAuthToken: '',
           host: 'https://localhost:5000',
           locustfileSource: '',
           queueMode: 'start_now',
@@ -155,6 +157,7 @@ describe('SwarmForm', () => {
 
       if (submittedData) {
         expect(submittedData).toEqual({
+          gitAuthToken: '',
           host: '',
           locustfileSource: '',
           queueMode: 'start_now',
@@ -205,6 +208,7 @@ describe('SwarmForm', () => {
 
       if (submittedData) {
         expect(submittedData).toEqual({
+          gitAuthToken: '',
           host: swarmStateMock.host,
           locustfileSource: '',
           queueMode: 'start_now',
@@ -265,6 +269,7 @@ describe('SwarmForm', () => {
 
       if (submittedData) {
         expect(submittedData).toEqual({
+          gitAuthToken: '',
           host: swarmStateMock.host,
           locustfileSource: '',
           queueMode: 'start_now',
@@ -296,6 +301,7 @@ describe('SwarmForm', () => {
 
       if (submittedData) {
         expect(submittedData).toEqual({
+          gitAuthToken: '',
           host: swarmStateMock.host,
           locustfileSource: '',
           queueMode: 'start_now',
@@ -323,6 +329,7 @@ describe('SwarmForm', () => {
 
       if (submittedData) {
         expect(submittedData).toEqual({
+          gitAuthToken: '',
           host: swarmStateMock.host,
           locustfileSource: 's3://load-tests/checkout.py',
           queueMode: 'start_now',
@@ -342,6 +349,9 @@ describe('SwarmForm', () => {
       fireEvent.change(getByLabelText('Locustfile source'), {
         target: { value: 'git+https://github.com/acme/load-tests.git' },
       });
+      fireEvent.change(getByLabelText('Git auth token'), {
+        target: { value: 'github-token' },
+      });
       fireEvent.click(getByText('Discover tests'));
     });
 
@@ -359,9 +369,11 @@ describe('SwarmForm', () => {
 
       if (previewData && submittedData) {
         expect(previewData).toEqual({
+          gitAuthToken: 'github-token',
           locustfileSource: 'git+https://github.com/acme/load-tests.git',
         });
         expect(submittedData).toEqual({
+          gitAuthToken: 'github-token',
           host: swarmStateMock.host,
           locustfileSource: 'git+https://github.com/acme/load-tests.git',
           queueMode: 'start_now',
@@ -391,6 +403,7 @@ describe('SwarmForm', () => {
 
       if (submittedData) {
         expect(submittedData).toEqual({
+          gitAuthToken: '',
           host: swarmStateMock.host,
           locustfileSource: '',
           queueMode: 'queue',
@@ -426,6 +439,7 @@ describe('SwarmForm', () => {
 
       if (submittedData) {
         expect(submittedData).toEqual({
+          gitAuthToken: '',
           host: swarmStateMock.host,
           locustfileSource: '',
           queueMode: 'schedule',
