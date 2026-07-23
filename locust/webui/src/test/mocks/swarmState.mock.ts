@@ -21,6 +21,7 @@ export const swarmStateMock = {
   percentile1: 0.95,
   percentile2: 0.99,
   percentilesToStatistics: percentilesToStatistics,
+  scheduledTests: [],
   showUserclassPicker: false,
   spawnRate: null,
   state: 'ready',

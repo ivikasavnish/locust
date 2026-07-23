@@ -15,6 +15,7 @@ import json
 import logging
 import os
 import traceback
+from datetime import datetime, timedelta
 from io import StringIO
 from tempfile import NamedTemporaryFile
 
@@ -965,6 +966,81 @@ class TestWebUI(LocustTestCase, _HeaderCheckMixin):
 
         # stop
         response = requests.get("http://127.0.0.1:%i/stop" % self.web_port)
+
+    def test_swarm_loads_locustfile_source_from_ui(self):
+        with NamedTemporaryFile(mode="w", suffix=".py") as locustfile:
+            locustfile.write(
+                "from locust import User, task, constant\n"
+                "class CloudLoadedUser(User):\n"
+                "    wait_time = constant(1)\n"
+                "    @task\n"
+                "    def my_task(self):\n"
+                "        pass\n"
+            )
+            locustfile.flush()
+
+            response = requests.post(
+                "http://127.0.0.1:%i/swarm" % self.web_port,
+                data={
+                    "locustfile_source": locustfile.name,
+                    "user_count": 1,
+                    "spawn_rate": 1,
+                    "host": "https://localhost",
+                },
+            )
+
+        self.assertEqual(200, response.status_code)
+        self.assertEqual(True, response.json()["success"])
+        self.assertEqual(["CloudLoadedUser"], sorted(self.environment.user_classes_by_name))
+        self.assertEqual(locustfile.name, self.environment.locustfile)
+        requests.get("http://127.0.0.1:%i/stop" % self.web_port)
+
+    def test_swarm_queues_test_from_ui(self):
+        class MyUser(User):
+            wait_time = constant(1)
+
+            @task(1)
+            def my_task(self):
+                pass
+
+        self.environment.user_classes = [MyUser]
+        response = requests.post(
+            "http://127.0.0.1:%i/swarm" % self.web_port,
+            data={
+                "queue_mode": "queue",
+                "user_count": 1,
+                "spawn_rate": 1,
+                "host": "https://localhost",
+                "run_time": "1s",
+            },
+        )
+
+        self.assertEqual(200, response.status_code)
+        self.assertEqual(True, response.json()["success"])
+        self.assertEqual("Load test queued", response.json()["message"])
+        self.assertEqual("queued", response.json()["queue_status"])
+
+        jobs_response = requests.get("http://127.0.0.1:%i/scheduled-tests" % self.web_port)
+        self.assertEqual(200, jobs_response.status_code)
+        self.assertEqual(response.json()["job_id"], jobs_response.json()["scheduled_tests"][0]["id"])
+        requests.get("http://127.0.0.1:%i/stop" % self.web_port)
+
+    def test_swarm_rejects_past_schedule_from_ui(self):
+        scheduled_start_time = (datetime.now() - timedelta(minutes=5)).isoformat(timespec="minutes")
+        response = requests.post(
+            "http://127.0.0.1:%i/swarm" % self.web_port,
+            data={
+                "queue_mode": "schedule",
+                "scheduled_start_time": scheduled_start_time,
+                "user_count": 1,
+                "spawn_rate": 1,
+                "host": "https://localhost",
+            },
+        )
+
+        self.assertEqual(200, response.status_code)
+        self.assertEqual(False, response.json()["success"])
+        self.assertEqual("Scheduled start time must be in the future.", response.json()["message"])
 
     def test_host_value_from_user_class(self):
         class MyUser(User):

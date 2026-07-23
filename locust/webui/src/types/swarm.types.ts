@@ -68,6 +68,20 @@ export interface ISwarmState {
   workerCount: number;
   profile?: string;
   allProfiles?: string[];
+  scheduledTests?: IScheduledTest[];
+}
+
+export interface IScheduledTest {
+  id: string;
+  status: string;
+  createdAt: string;
+  scheduledStartTime?: string;
+  locustfileSource?: string;
+  host?: string;
+  userCount?: string | number;
+  spawnRate?: string | number;
+  runTime?: string;
+  profile?: string;
 }
 
 export interface IReport {
@@ -96,7 +110,10 @@ export interface IReportTemplateArgs extends Omit<IReport, 'charts'> {
 export interface ISwarmFormInput extends Partial<
   Pick<ISwarmState, 'host' | 'profile' | 'spawnRate' | 'userCount' | 'extraOptions'>
 > {
+  locustfileSource?: string;
+  queueMode?: 'start_now' | 'queue' | 'schedule';
   runTime?: string;
+  scheduledStartTime?: string;
   userClasses?: string[];
   shapeClass?: string;
 }
@@ -105,4 +122,5 @@ export interface IStartSwarmResponse {
   success: boolean;
   message: string;
   host: string;
+  scheduledTests?: IScheduledTest[];
 }

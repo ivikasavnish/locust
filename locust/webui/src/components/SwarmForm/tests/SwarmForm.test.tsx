@@ -44,6 +44,8 @@ describe('SwarmForm', () => {
       if (submittedData) {
         expect(submittedData).toEqual({
           host: swarmStateMock.host,
+          locustfileSource: '',
+          queueMode: 'start_now',
           runTime: '',
           profile: '',
           spawnRate: '1',
@@ -90,6 +92,8 @@ describe('SwarmForm', () => {
       if (submittedData) {
         expect(submittedData).toEqual({
           host: 'https://localhost:5000',
+          locustfileSource: '',
+          queueMode: 'start_now',
           runTime: '2h',
           profile: '',
           spawnRate: '20',
@@ -138,6 +142,8 @@ describe('SwarmForm', () => {
       if (submittedData) {
         expect(submittedData).toEqual({
           host: '',
+          locustfileSource: '',
+          queueMode: 'start_now',
           runTime: '',
           profile: '',
           spawnRate: '1',
@@ -186,6 +192,8 @@ describe('SwarmForm', () => {
       if (submittedData) {
         expect(submittedData).toEqual({
           host: swarmStateMock.host,
+          locustfileSource: '',
+          queueMode: 'start_now',
           runTime: '',
           profile: '',
           spawnRate: '1',
@@ -244,6 +252,8 @@ describe('SwarmForm', () => {
       if (submittedData) {
         expect(submittedData).toEqual({
           host: swarmStateMock.host,
+          locustfileSource: '',
+          queueMode: 'start_now',
           runTime: '',
           profile: '',
           spawnRate: '1',
@@ -273,10 +283,102 @@ describe('SwarmForm', () => {
       if (submittedData) {
         expect(submittedData).toEqual({
           host: swarmStateMock.host,
+          locustfileSource: '',
+          queueMode: 'start_now',
           runTime: '',
           spawnRate: '1',
           userCount: '1',
           profile: testProfile,
+        });
+      }
+    });
+  });
+
+  test('should submit a cloud locustfile source', async () => {
+    const { getByText, getByLabelText } = renderWithProvider(<SwarmForm />);
+
+    act(() => {
+      fireEvent.change(getByLabelText('Locustfile source'), {
+        target: { value: 's3://load-tests/checkout.py' },
+      });
+      fireEvent.click(getByText('Start'));
+    });
+
+    await waitFor(async () => {
+      const submittedData = getStartSwarmMockCall();
+
+      if (submittedData) {
+        expect(submittedData).toEqual({
+          host: swarmStateMock.host,
+          locustfileSource: 's3://load-tests/checkout.py',
+          queueMode: 'start_now',
+          runTime: '',
+          spawnRate: '1',
+          userCount: '1',
+          profile: '',
+        });
+      }
+    });
+  });
+
+  test('should submit queued test mode', async () => {
+    const { container, getByText } = renderWithProvider(<SwarmForm />);
+
+    act(() => {
+      fireEvent.change(container.querySelector('select[name="queueMode"]') as HTMLSelectElement, {
+        target: { value: 'queue' },
+      });
+      fireEvent.click(getByText('Start'));
+    });
+
+    await waitFor(async () => {
+      const submittedData = getStartSwarmMockCall();
+
+      if (submittedData) {
+        expect(submittedData).toEqual({
+          host: swarmStateMock.host,
+          locustfileSource: '',
+          queueMode: 'queue',
+          runTime: '',
+          spawnRate: '1',
+          userCount: '1',
+          profile: '',
+        });
+      }
+    });
+  });
+
+  test('should submit scheduled test mode', async () => {
+    const { container, findByLabelText, getByText } = renderWithProvider(<SwarmForm />);
+
+    act(() => {
+      fireEvent.change(container.querySelector('select[name="queueMode"]') as HTMLSelectElement, {
+        target: { value: 'schedule' },
+      });
+    });
+
+    const scheduledStartTimeInput = await findByLabelText('Scheduled start time');
+
+    act(() => {
+      fireEvent.change(scheduledStartTimeInput, {
+        target: { value: '2026-08-01T09:30' },
+      });
+      fireEvent.click(getByText('Start'));
+    });
+
+    await waitFor(async () => {
+      const submittedData = getStartSwarmMockCall();
+
+      if (submittedData) {
+        expect(submittedData).toEqual({
+          host: swarmStateMock.host,
+          locustfileSource: '',
+          queueMode: 'schedule',
+          runTime: '',
+          scheduledStartTime: '2026-08-01T09:30',
+          spawnRate: '1',
+          userCount: '1',
+          profile: '',
         });
       }
     });

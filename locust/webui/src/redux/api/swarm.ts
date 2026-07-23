@@ -54,6 +54,7 @@ export const api = createApi({
         body: createFormData(snakeCaseKeys(body)),
         headers: { 'content-type': 'application/x-www-form-urlencoded' },
       }),
+      transformResponse: camelCaseKeys<IStartSwarmResponse>,
     }),
     updateUserSettings: builder.mutation({
       query: body => ({

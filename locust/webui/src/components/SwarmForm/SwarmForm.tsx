@@ -9,6 +9,8 @@ import {
   Box,
   Button,
   Container,
+  FormControl,
+  InputLabel,
   Link,
   SelectChangeEvent,
   TextField,
@@ -73,6 +75,7 @@ interface ISwarmForm
       | 'isHostRequired'
       | 'profile'
       | 'runTime'
+      | 'scheduledTests'
       | 'showUserclassPicker'
       | 'spawnRate'
       | 'numUsers'
@@ -133,6 +136,7 @@ function SwarmForm({
   const [errorMessage, setErrorMessage] = useState('');
   const [selectedUserClasses, setSelectedUserClasses] = useState(availableUserClasses);
   const [hostValue, setHostValue] = useState(host || '');
+  const [queueMode, setQueueMode] = useState<ISwarmFormInput['queueMode']>('start_now');
   const swarm = useSelector(({ swarm }) => swarm);
   const { register } = useForm();
 
@@ -162,6 +166,7 @@ function SwarmForm({
         state: SWARM_STATE.RUNNING,
         host: inputData.host || host,
         runTime: inputData.runTime,
+        ...(data.scheduledTests ? { scheduledTests: data.scheduledTests } : {}),
         extraOptions: updatedExtraOptions,
         spawnRate: inputData.spawnRate,
         userCount: inputData.userCount,
@@ -268,6 +273,85 @@ function SwarmForm({
                 required={isHostRequired}
                 value={hostValue || ''}
               />
+              <Accordion defaultExpanded={!isEditSwarm}>
+                <AccordionSummary expandIcon={<ExpandMoreIcon />}>
+                  <Typography>Test source and run mode</Typography>
+                </AccordionSummary>
+                <AccordionDetails>
+                  <Box sx={{ display: 'flex', flexDirection: 'column', rowGap: 3 }}>
+                    <TextField
+                      label='Locustfile source'
+                      name='locustfileSource'
+                      placeholder='s3://bucket/test.py or gs://bucket/test.py'
+                    />
+                    <FormControl>
+                      <InputLabel htmlFor='queueMode' shrink>
+                        Run mode
+                      </InputLabel>
+                      <Box
+                        component='select'
+                        id='queueMode'
+                        name='queueMode'
+                        onChange={event =>
+                          setQueueMode(event.target.value as ISwarmFormInput['queueMode'])
+                        }
+                        sx={{
+                          appearance: 'auto',
+                          backgroundColor: 'background.paper',
+                          border: 1,
+                          borderColor: 'divider',
+                          borderRadius: 1,
+                          color: 'text.primary',
+                          font: 'inherit',
+                          mt: 2,
+                          px: 1.5,
+                          py: 2,
+                        }}
+                        value={queueMode}
+                      >
+                        <option value='start_now'>Start now</option>
+                        <option value='queue'>Queue after current test</option>
+                        <option value='schedule'>Schedule for later</option>
+                      </Box>
+                    </FormControl>
+                    <TextField
+                      label='Scheduled start time'
+                      name='scheduledStartTime'
+                      slotProps={{ inputLabel: { shrink: true } }}
+                      type='datetime-local'
+                    />
+                    {!!swarm.scheduledTests?.length && (
+                      <Box sx={{ display: 'flex', flexDirection: 'column', rowGap: 1 }}>
+                        <Typography variant='subtitle2'>Queued and scheduled tests</Typography>
+                        {swarm.scheduledTests.slice(0, 5).map(test => (
+                          <Box
+                            key={test.id}
+                            sx={{
+                              border: '1px solid',
+                              borderColor: 'divider',
+                              borderRadius: 1,
+                              display: 'grid',
+                              gap: 0.5,
+                              gridTemplateColumns: '1fr auto',
+                              p: 1,
+                            }}
+                          >
+                            <Typography noWrap variant='body2'>
+                              {test.locustfileSource || test.host || 'Default locustfile'}
+                            </Typography>
+                            <Typography color='text.secondary' variant='body2'>
+                              {test.status}
+                            </Typography>
+                            <Typography color='text.secondary' variant='caption'>
+                              {test.scheduledStartTime || test.createdAt}
+                            </Typography>
+                          </Box>
+                        ))}
+                      </Box>
+                    )}
+                  </Box>
+                </AccordionDetails>
+              </Accordion>
               <Accordion>
                 <AccordionSummary expandIcon={<ExpandMoreIcon />}>
                   <Typography>Advanced options</Typography>
@@ -358,6 +442,7 @@ const storeConnector = (
       isHostRequired,
       profile,
       runTime,
+      scheduledTests,
       spawnRate,
       showUserclassPicker,
     },
@@ -379,6 +464,7 @@ const storeConnector = (
   numUsers,
   userCount,
   runTime,
+  scheduledTests,
   spawnRate,
 });
 

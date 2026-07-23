@@ -6,10 +6,13 @@ import json
 import logging
 import mimetypes
 import os.path
+import time
+from datetime import datetime
 from functools import wraps
 from io import StringIO
 from json import dumps
 from typing import TYPE_CHECKING, Any, TypedDict
+from uuid import uuid4
 
 import gevent
 from flask import (
@@ -40,6 +43,7 @@ from .user.inspectuser import get_ratio
 from .user.users import HttpUser
 from .util.cache import memoize
 from .util.date import format_safe_timestamp
+from .util.load_locustfile import load_locustfile, load_locustfile_pytest
 from .util.timespan import parse_timespan
 
 if TYPE_CHECKING:
@@ -161,6 +165,7 @@ class WebUI:
         app.debug = True
         self.greenlet: gevent.Greenlet | None = None
         self._swarm_greenlet: gevent.Greenlet | None = None
+        self.scheduled_tests: list[dict[str, Any]] = []
         self.template_args = {}
         self.auth_args = {}
         self.app.template_folder = build_path or DEFAULT_BUILD_PATH
@@ -213,134 +218,34 @@ class WebUI:
         def swarm() -> Response:
             assert request.method == "POST"
 
-            # Loading UserClasses & ShapeClasses if Locust is running with UserClass Picker
-            if self.userclass_picker_is_active:
-                if not self.environment.available_user_classes:
-                    err_msg = "UserClass picker is active but there are no available UserClasses"
-                    return jsonify({"success": False, "message": err_msg, "host": environment.host})
+            form_data = self._normalize_form_data(request.form)
+            queue_mode = form_data.pop("queue_mode", "start_now")
+            scheduled_start_time = form_data.pop("scheduled_start_time", "")
 
-                # Getting Specified User Classes
-                form_data_user_class_names = request.form.getlist("user_classes")
+            if queue_mode in {"queue", "schedule"}:
+                try:
+                    job = self._enqueue_swarm_job(form_data, scheduled_start_time if queue_mode == "schedule" else "")
+                except ValueError as e:
+                    return jsonify({"success": False, "message": str(e), "host": environment.host})
 
-                # Updating UserClasses
-                if form_data_user_class_names:
-                    user_classes = {
-                        user_class_name: user_class_object
-                        for user_class_name, user_class_object in self.environment.available_user_classes.items()
-                        if user_class_name in form_data_user_class_names
-                    }
-
-                else:
-                    if self.environment.runner and self.environment.runner.state == STATE_RUNNING:
-                        # Test is already running
-                        # Using the user classes that have already been selected
-                        user_classes = {
-                            key: value
-                            for (key, value) in self.environment.available_user_classes.items()
-                            if value in self.environment.user_classes
-                        }
-                    else:
-                        # Starting test with no user class selection
-                        # Defaulting to using all available user classes
-                        user_classes = self.environment.available_user_classes
-
-                self._update_user_classes(user_classes)
-
-                # Updating ShapeClass if specified in WebUI Form
-                form_data_shape_class_name = request.form.get("shape_class", "Default")
-                if form_data_shape_class_name == "Default":
-                    self._update_shape_class(None)
-                else:
-                    self._update_shape_class(form_data_shape_class_name)
-
-            parsed_options_dict = vars(environment.parsed_options) if environment.parsed_options else {}
-            run_time = None
-            user_count = None
-            spawn_rate = None
-            for key, value in request.form.items():
-                match key:
-                    case "user_count":  # if we just renamed this field to "users" we wouldn't need this
-                        user_count = int(value)
-                        parsed_options_dict["users"] = user_count
-                    case "spawn_rate":
-                        spawn_rate = float(value)
-                        parsed_options_dict[key] = spawn_rate
-                    case "host":
-                        # Replace < > to guard against XSS
-                        environment.host = str(request.form["host"]).replace("<", "").replace(">", "")
-                        parsed_options_dict[key] = environment.host
-                    case "user_classes":
-                        # Set environment.parsed_options.user_classes to the selected user_classes
-                        parsed_options_dict[key] = request.form.getlist("user_classes")
-                    case "run_time":
-                        if not value:
-                            continue
-                        try:
-                            run_time = parse_timespan(value)
-                            parsed_options_dict[key] = run_time
-                        except ValueError:
-                            err_msg = "Valid run_time formats are : 20, 20s, 3m, 2h, 1h20m, 3h30m10s, etc."
-                            logger.error(err_msg)
-                            return jsonify({"success": False, "message": err_msg, "host": environment.host})
-                    case "profile":
-                        environment.profile = str(request.form["profile"]) or None
-                        parsed_options_dict[key] = environment.profile
-                    case _ if key in parsed_options_dict:
-                        # update the value in environment.parsed_options, but dont change the type.
-                        parsed_options_value = parsed_options_dict[key]
-
-                        if isinstance(parsed_options_value, bool):
-                            parsed_options_dict[key] = value == "true"
-                        elif parsed_options_value is None:
-                            parsed_options_dict[key] = value
-                        elif isinstance(parsed_options_value, list):
-                            if "," in value:
-                                value_as_list = value.split(",")
-                            else:
-                                value_as_list = request.form.getlist(key)
-                            if all(isinstance(x, int) for x in parsed_options_value):
-                                parsed_options_dict[key] = list(map(int, value_as_list))
-                            else:
-                                parsed_options_dict[key] = value_as_list
-                        else:
-                            parsed_options_dict[key] = type(parsed_options_value)(value)
-
-            if environment.shape_class and environment.runner is not None:
-                environment.runner.start_shape()
                 return jsonify(
                     {
                         "success": True,
-                        "message": f"Swarming started using shape class '{type(environment.shape_class).__name__}'",
+                        "message": "Load test scheduled" if job["scheduled_start_time"] else "Load test queued",
                         "host": environment.host,
+                        "job_id": job["id"],
+                        "queue_status": job["status"],
+                        "scheduled_start_time": job["scheduled_start_time"],
+                        "scheduled_tests": self.scheduled_tests,
                     }
                 )
 
-            if self._swarm_greenlet is not None:
-                self._swarm_greenlet.kill(block=True)
-                self._swarm_greenlet = None
+            return jsonify(self._start_swarm_from_form(form_data))
 
-            if environment.runner is not None:
-                if user_count is None or not spawn_rate:
-                    err_msg = "Missing user_count or spawn_rate from /swarm request"
-                    logger.error(err_msg)
-                    return jsonify({"success": False, "message": err_msg, "host": environment.host})
-                self._swarm_greenlet = gevent.spawn(environment.runner.start, user_count, spawn_rate)
-                self._swarm_greenlet.link_exception(greenlet_exception_handler)
-                response_data: dict[str, Any] = {
-                    "success": True,
-                    "message": "Swarming started",
-                    "host": environment.host,
-                }
-                if run_time:
-                    gevent.spawn_later(run_time, self._stop_runners).link_exception(greenlet_exception_handler)
-                    response_data["run_time"] = run_time
-
-                if self.userclass_picker_is_active:
-                    response_data["user_classes"] = sorted(user_classes.keys())
-
-                return jsonify(response_data)
-            else:
-                return jsonify({"success": False, "message": "No runner", "host": environment.host})
+        @app_blueprint.route("/scheduled-tests")
+        @self.auth_required_if_enabled
+        def scheduled_tests() -> Response:
+            return jsonify({"scheduled_tests": self.scheduled_tests})
 
         @app_blueprint.route("/stop")
         @self.auth_required_if_enabled
@@ -639,6 +544,231 @@ class WebUI:
         """
         self.server.stop()
 
+    def _normalize_form_data(self, form) -> dict[str, Any]:
+        return {key: form.getlist(key) if len(form.getlist(key)) > 1 else form.get(key, "") for key in form.keys()}
+
+    def _enqueue_swarm_job(self, form_data: dict[str, Any], scheduled_start_time: str) -> dict[str, Any]:
+        start_after = None
+        if scheduled_start_time:
+            try:
+                start_after = datetime.fromisoformat(scheduled_start_time).timestamp()
+            except ValueError:
+                raise ValueError("Scheduled start time must use the browser date/time picker format.")
+
+            if start_after <= time.time():
+                raise ValueError("Scheduled start time must be in the future.")
+
+        job = {
+            "id": uuid4().hex,
+            "status": "scheduled" if start_after else "queued",
+            "created_at": datetime.now().isoformat(timespec="seconds"),
+            "scheduled_start_time": scheduled_start_time,
+            "locustfile_source": form_data.get("locustfile_source", ""),
+            "host": form_data.get("host", ""),
+            "user_count": form_data.get("user_count", ""),
+            "spawn_rate": form_data.get("spawn_rate", ""),
+            "run_time": form_data.get("run_time", ""),
+            "profile": form_data.get("profile", ""),
+            "form_data": form_data,
+        }
+        self.scheduled_tests.append(job)
+        gevent.spawn(self._run_queued_swarm_job, job).link_exception(greenlet_exception_handler)
+        return job
+
+    def _run_queued_swarm_job(self, job: dict[str, Any]) -> None:
+        if job["scheduled_start_time"]:
+            gevent.sleep(max(0, datetime.fromisoformat(job["scheduled_start_time"]).timestamp() - time.time()))
+
+        while self.environment.runner is not None and self.environment.runner.state == STATE_RUNNING:
+            gevent.sleep(1)
+
+        job["status"] = "running"
+        response = self._start_swarm_from_form(job["form_data"])
+        if response["success"]:
+            job["status"] = "started"
+            job["started_at"] = datetime.now().isoformat(timespec="seconds")
+        else:
+            job["status"] = "failed"
+            job["error"] = response["message"]
+
+    def _start_swarm_from_form(self, form_data: dict[str, Any]) -> dict[str, Any]:
+        if locustfile_source := str(form_data.get("locustfile_source", "")).strip():
+            try:
+                self._load_locustfile_source(locustfile_source)
+            except Exception as e:
+                logger.exception("Failed to load locustfile from UI source")
+                return {"success": False, "message": f"Failed to load locustfile: {e}", "host": self.environment.host}
+
+        user_classes: dict[str, Any] = {}
+        if self.userclass_picker_is_active:
+            if not self.environment.available_user_classes:
+                err_msg = "UserClass picker is active but there are no available UserClasses"
+                return {"success": False, "message": err_msg, "host": self.environment.host}
+
+            form_data_user_class_names = self._form_values(form_data, "user_classes")
+
+            if form_data_user_class_names:
+                user_classes = {
+                    user_class_name: user_class_object
+                    for user_class_name, user_class_object in self.environment.available_user_classes.items()
+                    if user_class_name in form_data_user_class_names
+                }
+            elif self.environment.runner and self.environment.runner.state == STATE_RUNNING:
+                user_classes = {
+                    key: value
+                    for (key, value) in self.environment.available_user_classes.items()
+                    if value in self.environment.user_classes
+                }
+            else:
+                user_classes = self.environment.available_user_classes
+
+            self._update_user_classes(user_classes)
+
+            form_data_shape_class_name = str(form_data.get("shape_class", "Default"))
+            if form_data_shape_class_name == "Default":
+                self._update_shape_class(None)
+            else:
+                self._update_shape_class(form_data_shape_class_name)
+
+        parsed_options_dict = vars(self.environment.parsed_options) if self.environment.parsed_options else {}
+        run_time = None
+        user_count = None
+        spawn_rate = None
+        ignored_keys = {"locustfile_source"}
+        for key, value in form_data.items():
+            if key in ignored_keys:
+                continue
+            value = value[0] if isinstance(value, list) and len(value) == 1 else value
+            match key:
+                case "user_count":  # if we just renamed this field to "users" we wouldn't need this
+                    user_count = int(value)
+                    parsed_options_dict["users"] = user_count
+                case "spawn_rate":
+                    spawn_rate = float(value)
+                    parsed_options_dict[key] = spawn_rate
+                case "host":
+                    # Replace < > to guard against XSS
+                    self.environment.host = str(value).replace("<", "").replace(">", "")
+                    parsed_options_dict[key] = self.environment.host
+                case "user_classes":
+                    # Set environment.parsed_options.user_classes to the selected user_classes
+                    parsed_options_dict[key] = self._form_values(form_data, "user_classes")
+                case "run_time":
+                    if not value:
+                        continue
+                    try:
+                        run_time = parse_timespan(str(value))
+                        parsed_options_dict[key] = run_time
+                    except ValueError:
+                        err_msg = "Valid run_time formats are : 20, 20s, 3m, 2h, 1h20m, 3h30m10s, etc."
+                        logger.error(err_msg)
+                        return {"success": False, "message": err_msg, "host": self.environment.host}
+                case "profile":
+                    self.environment.profile = str(value) or None
+                    parsed_options_dict[key] = self.environment.profile
+                case _ if key in parsed_options_dict:
+                    # update the value in environment.parsed_options, but dont change the type.
+                    parsed_options_value = parsed_options_dict[key]
+
+                    if isinstance(parsed_options_value, bool):
+                        parsed_options_dict[key] = value == "true"
+                    elif parsed_options_value is None:
+                        parsed_options_dict[key] = value
+                    elif isinstance(parsed_options_value, list):
+                        value_as_list = (
+                            value.split(",")
+                            if isinstance(value, str) and "," in value
+                            else self._form_values(form_data, key)
+                        )
+                        if all(isinstance(x, int) for x in parsed_options_value):
+                            parsed_options_dict[key] = list(map(int, value_as_list))
+                        else:
+                            parsed_options_dict[key] = value_as_list
+                    else:
+                        parsed_options_dict[key] = type(parsed_options_value)(value)
+
+        if self.environment.shape_class and self.environment.runner is not None:
+            self.environment.runner.start_shape()
+            return {
+                "success": True,
+                "message": f"Swarming started using shape class '{type(self.environment.shape_class).__name__}'",
+                "host": self.environment.host,
+            }
+
+        if self._swarm_greenlet is not None:
+            self._swarm_greenlet.kill(block=True)
+            self._swarm_greenlet = None
+
+        if self.environment.runner is not None:
+            if user_count is None or not spawn_rate:
+                err_msg = "Missing user_count or spawn_rate from /swarm request"
+                logger.error(err_msg)
+                return {"success": False, "message": err_msg, "host": self.environment.host}
+            self._swarm_greenlet = gevent.spawn(self.environment.runner.start, user_count, spawn_rate)
+            self._swarm_greenlet.link_exception(greenlet_exception_handler)
+            response_data: dict[str, Any] = {
+                "success": True,
+                "message": "Swarming started",
+                "host": self.environment.host,
+            }
+            if run_time:
+                gevent.spawn_later(run_time, self._stop_runners).link_exception(greenlet_exception_handler)
+                response_data["run_time"] = run_time
+
+            if self.userclass_picker_is_active:
+                response_data["user_classes"] = sorted(user_classes.keys())
+
+            return response_data
+
+        return {"success": False, "message": "No runner", "host": self.environment.host}
+
+    def _form_values(self, form_data: dict[str, Any], key: str) -> list[str]:
+        value = form_data.get(key, [])
+        if isinstance(value, list):
+            return [str(item) for item in value]
+        if value:
+            return [str(value)]
+        return []
+
+    def _load_locustfile_source(self, locustfile_source: str) -> None:
+        locustfiles = argument_parser.parse_locustfile_paths([locustfile_source])
+        available_user_classes: dict[str, Any] = {}
+        available_shape_classes: dict[str, Any] = {}
+        available_user_tasks: dict[str, Any] = {}
+
+        def set_available_things(user_classes, shape_classes):
+            for shape_class in shape_classes:
+                available_shape_classes[type(shape_class).__name__] = shape_class
+
+            for class_name, class_definition in user_classes.items():
+                available_user_classes[class_name] = class_definition
+                available_user_tasks[class_name] = class_definition.tasks
+
+        for locustfile in locustfiles:
+            user_classes, shape_classes = load_locustfile(locustfile)
+            set_available_things(user_classes, shape_classes)
+
+        if not available_user_classes:
+            for locustfile in locustfiles:
+                user_classes = load_locustfile_pytest(locustfile)
+                set_available_things(user_classes, [])
+
+        if not available_user_classes:
+            raise ValueError("No User classes found in locustfile.")
+
+        self.environment.parsed_locustfiles = locustfiles
+        self.environment.locustfile = locustfile_source
+        self.environment.available_user_classes = available_user_classes
+        self.environment.available_shape_classes = available_shape_classes
+        self.environment.available_user_tasks = available_user_tasks
+        self.environment.user_classes = list(available_user_classes.values())
+        self.environment.shape_class = list(available_shape_classes.values())[0] if available_shape_classes else None
+        if self.environment.shape_class and self.environment.runner:
+            self.environment.shape_class.runner = self.environment.runner
+        self.environment._remove_user_classes_with_weight_zero()
+        self.environment._validate_user_class_name_uniqueness()
+        self.environment._validate_shape_class_instance()
+
     def auth_required_if_enabled(self, view_func):
         """
         Decorator that can be used on custom route methods that will turn on Flask Login
@@ -754,6 +884,7 @@ class WebUI:
             "percentiles_to_statistics": stats.PERCENTILES_TO_STATISTICS,
             "is_host_required": HOST_IS_REQUIRED,
             "profile": self.environment.profile,
+            "scheduled_tests": self.scheduled_tests,
         }
 
         self.template_args = {**self.template_args, **new_template_args}
